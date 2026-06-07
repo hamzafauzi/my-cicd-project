@@ -1,111 +1,120 @@
-# CI/CD Pipeline from Scratch — FastAPI + Docker + GitHub Actions + Render
+# FastAPI CI/CD Deployment Pipeline
 
-![CI](https://github.com/hamzafauzi/my-cicd-project/actions/workflows/ci.yml/badge.svg)
+A small FastAPI service, containerized with Docker and deployed to a self-managed
+Linux server on AWS — with a full CI/CD pipeline that automatically rebuilds and
+redeploys the app on every push to `main`. Served over HTTPS behind an Nginx
+reverse proxy.
 
-A small but complete **continuous integration and continuous deployment (CI/CD) pipeline**, built from the ground up. A single `git push` automatically tests the code, packages it into a Docker container, and deploys it live to the internet — with no manual steps in between.
+This project is less about the app itself and more about the **infrastructure and
+automation around it**: provisioning a cloud server, securing it to production
+standards, containerizing a service, terminating TLS, and wiring up continuous
+deployment.
 
-The application itself is intentionally simple (a tiny web API). The point of this project is the **automation around it**.
-
-**Live demo:** https://my-cicd-project-7i66.onrender.com
-- Health check: [`/health`](https://my-cicd-project-7i66.onrender.com/health)
-- Example endpoint: [`/add?a=5&b=7`](https://my-cicd-project-7i66.onrender.com/add?a=5&b=7)
-- Interactive API docs: [`/docs`](https://my-cicd-project-7i66.onrender.com/docs)
-
-> Note: the live demo is hosted on a free tier that sleeps after inactivity. The first request after an idle period may take 30–50 seconds to wake up.
-
-## How the pipeline works
-
-```
-   git push
-      │
-      ▼
-┌─────────────┐     ┌──────────────────────┐     ┌────────────────────┐
-│   GitHub    │────▶│   GitHub Actions      │────▶│       Render        │
-│ (source of  │     │   (CI)                │     │       (CD)          │
-│  truth)     │     │   • lint / install    │     │   • builds Docker   │
-│             │     │   • run pytest        │     │     image           │
-│             │     │   • pass / fail gate  │     │   • deploys live    │
-└─────────────┘     └──────────────────────┘     └────────────────────┘
-                                                            │
-                                                            ▼
-                                                   Live public URL
-```
-
-1. **Push** — code is pushed to the `main` branch on GitHub.
-2. **Continuous Integration (GitHub Actions)** — a fresh Ubuntu runner checks out the code, installs dependencies, and runs the automated test suite. If any test fails, the run is marked failed.
-3. **Continuous Deployment (Render)** — Render watches the repository and, on every push, rebuilds the application from the `Dockerfile` and redeploys it automatically.
+---
 
 ## Tech stack
 
-| Layer | Tool | Why |
-|-------|------|-----|
-| Application | **FastAPI** (Python) | Minimal, modern web framework with automatic interactive docs |
-| Server | **Uvicorn** | ASGI server that runs the FastAPI app |
-| Testing | **pytest** | Runs the automated test suite |
-| Containerization | **Docker** | Packages the app + Python + dependencies into one portable image |
-| CI | **GitHub Actions** | Runs tests automatically on every push |
-| CD / Hosting | **Render** | Auto-builds from the Dockerfile and deploys on every push |
+| Layer            | Tooling                                  |
+|------------------|------------------------------------------|
+| Application      | Python, FastAPI, Uvicorn                 |
+| Containerization | Docker                                   |
+| Server           | AWS EC2 (Ubuntu LTS)                      |
+| Reverse proxy    | Nginx                                     |
+| TLS / HTTPS      | Let's Encrypt + Certbot (auto-renewing)  |
+| CI/CD            | GitHub Actions                           |
+| DNS              | DuckDNS                                   |
 
-## Project structure
+---
 
-```
-my-cicd-project/
-├── app/
-│   ├── __init__.py
-│   └── main.py              # FastAPI app and endpoints
-├── tests/
-│   ├── __init__.py
-│   └── test_main.py         # automated tests for the endpoints
-├── .github/
-│   └── workflows/
-│       └── ci.yml           # GitHub Actions CI pipeline
-├── Dockerfile               # builds the container image
-├── .dockerignore
-├── .gitignore
-├── requirements.txt
-└── README.md
+## Architecture
+
+```mermaid
+flowchart TD
+    Dev["Developer<br/>git push to main"] --> GH["GitHub Actions runner<br/>(triggered on push)"]
+    GH -- "SSH (deploy key)" --> EC2
+
+    subgraph EC2["AWS EC2 — Ubuntu (hardened)"]
+        direction TB
+        Nginx["Nginx reverse proxy<br/>:443 HTTPS"] --> App["FastAPI container<br/>127.0.0.1:8000"]
+    end
+
+    User["Visitor"] -- "HTTPS" --> Nginx
 ```
 
-## Running it locally
+A request from the internet hits Nginx on port 443, which terminates TLS and
+forwards the request internally to the FastAPI container listening on
+`127.0.0.1:8000`. The container is never exposed to the public internet directly.
 
-Clone the repository and enter it:
+---
+
+## How the CI/CD pipeline works
+
+On every push to `main`, GitHub Actions:
+
+1. Spins up a fresh, ephemeral Ubuntu runner.
+2. Opens an SSH connection to the EC2 server using a dedicated deploy key
+   (stored as an encrypted GitHub secret).
+3. Runs the deploy script on the server: pull the latest code, rebuild the
+   Docker image, swap the running container, and prune old images.
+
+Because the image is rebuilt *after* the old container is confirmed running, a
+failed build leaves the previous version serving — the broken code never reaches
+production.
+
+Workflow definition: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
+
+---
+
+## Server hardening
+
+The server isn't a default box — it's secured the way a production host should be:
+
+- **SSH key-only authentication** (password and root login disabled).
+- **Two-layer firewall:** AWS Security Group at the cloud edge + UFW on the host,
+  exposing only ports 22, 80, and 443.
+- **fail2ban** to auto-ban brute-force login attempts.
+- **Automatic security updates** enabled.
+
+---
+
+## API endpoints
+
+| Method | Path       | Description                          |
+|--------|------------|--------------------------------------|
+| GET    | `/health`  | Health check, returns `{"status":"ok"}` |
+| GET    | `/add`     | Adds two integers (`?a=&b=`)         |
+| GET    | `/docs`    | Auto-generated Swagger UI            |
+
+---
+
+## Running locally
 
 ```bash
 git clone https://github.com/hamzafauzi/my-cicd-project.git
 cd my-cicd-project
+docker build -t myapp .
+docker run -d -p 8000:8000 myapp
+# visit http://localhost:8000/docs
 ```
 
-### Option A — run directly with Python
+---
 
-```bash
-python -m venv venv
-source venv/bin/activate        # on Windows: venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+## Future improvements
 
-Then open http://127.0.0.1:8000/docs
+- **Add a test stage (CI):** run the test suite on the runner and block deploys
+  if tests fail — turning this into a true CI *and* CD pipeline.
+- **Registry-based deploys:** build the image on the runner, push to a container
+  registry (GHCR), and have the server pull the finished image — separating build
+  from runtime so the server never compiles.
+- **Monitoring & backups:** uptime monitoring (e.g. Uptime Kuma) and automated
+  backups, plus a documented rollback runbook.
+- **Infrastructure as Code:** provision the server with Terraform and configure it
+  with Ansible so the whole environment is reproducible from code.
 
-### Option B — run with Docker
+---
 
-```bash
-docker build -t my-cicd-app .
-docker run -p 8000:8000 my-cicd-app
-```
+## What this project demonstrates
 
-Then open http://127.0.0.1:8000/docs
-
-## Running the tests
-
-```bash
-pytest
-```
-
-The same test suite runs automatically on every push via GitHub Actions.
-
-## What I learned building this
-
-- The difference between an **image** (a frozen, layered filesystem) and a **container** (a running instance of an image), and why Docker solves the "works on my machine" problem.
-- How **port mapping** connects a port on the host to a port inside a container.
-- How **GitHub Actions** runs a workflow on a clean virtual machine on every push, acting as an automated safety net.
-- How **continuous deployment** ties the whole chain together so that pushing code is the only manual action required.
+Provisioning and securing a cloud Linux server, containerizing an application,
+configuring a reverse proxy with automated TLS, and building an end-to-end
+continuous deployment pipeline — the core workflow of modern DevOps.
